@@ -13,20 +13,19 @@ import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
 import {IUniswapV2Router} from "./interfaces/IUniswapV2Router.sol";
 import {UniswapV2Library} from "./utils/UniswapV2Library.sol";
 
-/// @title UniswapV2WrapperERC4626
-/// @notice Custom ERC4626 Wrapper for UniV2 Pools without swapping, accepting token0/token1 transfers
+/// @title DGswapV2ERC4626
+/// @notice Custom ERC4626 Wrapper for DGswapV2 Pools without swapping, accepting token0/token1 transfers
 /// @dev WARNING: Change your assumption about asset/share in context of deposit/mint/redeem/withdraw
 /// @notice Basic flow description:
-/// @notice Vault (ERC4626) - totalAssets() == lpToken of Uniswap Pool
+/// @notice Vault (ERC4626) - totalAssets() == lpToken of DGswap Pool
 /// @notice deposit(assets) -> assets == lpToken amount to receive
 /// @notice - user needs to approve both A,B tokens in X,Y amounts (see getLiquidityAmounts / getAssetsAmounts
 /// functions)
-/// @notice - check is run if A,B covers requested Z amount of UniLP
-/// @notice - deposit() safeTransfersFrom A,B to _min Z amount of UniLP
-/// @notice withdraw() -> withdraws both A,B in accrued X+n,Y+n amounts, burns Z amount of UniLP (or Vault's LP, those
+/// @notice - check is run if A,B covers requested Z amount of DGswapLP
+/// @notice - deposit() safeTransfersFrom A,B to _min Z amount of DGswapLP
+/// @notice withdraw() -> withdraws both A,B in accrued X+n,Y+n amounts, burns Z amount of DGswapLP (or Vault's LP, those
 /// are 1:1)
-/// @dev https://v2.info.uniswap.org/pair/0xae461ca67b15dc8dc81ce7615e0320da1a9ab8d5 (DAI-USDC LP/PAIR on ETH)
-/// @author ZeroPoint Labs
+/// @dev (USDT-ELDE LP/PAIR on KAIA)
 contract DgswapV2ERC4626 is ERC4626 {
     /*//////////////////////////////////////////////////////////////
                         LIBRARIES USAGES
@@ -58,8 +57,8 @@ contract DgswapV2ERC4626 is ERC4626 {
     /// @param asset_ ERC4626 asset (LP Token)
     /// @param token0_ ERC20 token0
     /// @param token1_ ERC20 token1
-    /// @param router_ UniswapV2Router
-    /// @param pair_ UniswapV2Pair
+    /// @param router_ DGswapV2Router
+    /// @param pair_ DGswapV2Pair
     /// @param slippage_ slippage param
     constructor(
         string memory name_,
@@ -122,7 +121,7 @@ contract DgswapV2ERC4626 is ERC4626 {
     function afterDeposit(uint256 assets_, uint256) internal override {
         (uint256 assets0, uint256 assets1) = getAssetsAmounts(assets_);
 
-        /// temp should be more elegant. better than max approve though
+        /// temp should be more elegant.
         token0.approve(address(router), assets0);
         token1.approve(address(router), assets1);
 
@@ -143,29 +142,29 @@ contract DgswapV2ERC4626 is ERC4626 {
                         ERC4626 OVERRIDES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Deposit pre-calculated amount of token0/1 to get amount of UniLP (assets/getUniLpFromAssets_)
+    /// @notice Deposit pre-calculated amount of token0/1 to get amount of DGswapLP (assets/getDGswapLpFromAssets_)
     /// @notice REQUIREMENT: Calculate amount of assets and have enough of assets0/1 to cover this amount for LP
     /// requested (slippage!)
-    /// @param getUniLpFromAssets_ Assume caller called getAssetsAmounts() first to know amount of assets to approve to
+    /// @param getDGswapLpFromAssets_ Assume caller called getAssetsAmounts() first to know amount of assets to approve to
     /// this contract
     /// @param receiver_ - Who will receive shares (Standard ERC4626)
     /// @return shares - Of this Vault (Standard ERC4626)
     function deposit(
-        uint256 getUniLpFromAssets_,
+        uint256 getDGswapLpFromAssets_,
         address receiver_
     ) public override returns (uint256 shares) {
-        /// From 100 uniLP msg.sender gets N shares (of this Vault)
+        /// From 100 DGswapLP msg.sender gets N shares (of this Vault)
         require(
-            (shares = previewDeposit(getUniLpFromAssets_)) != 0,
+            (shares = previewDeposit(getDGswapLpFromAssets_)) != 0,
             "ZERO_SHARES"
         );
 
         /// Ideally, msg.sender should call this function beforehand to get correct "assets" amount
         (uint256 assets0, uint256 assets1) = getAssetsAmounts(
-            getUniLpFromAssets_
+            getDGswapLpFromAssets_
         );
 
-        /// Best if we approve exact amounts, but because of UniV2 _min() we can sometimes approve to much/to little
+        /// Best if we approve exact amounts
         token0.safeTransferFrom(msg.sender, address(this), assets0);
 
         token1.safeTransferFrom(msg.sender, address(this), assets1);
@@ -173,12 +172,12 @@ contract DgswapV2ERC4626 is ERC4626 {
         _mint(receiver_, shares);
 
         /// Custom assumption about assets changes assumptions about this event
-        emit Deposit(msg.sender, receiver_, getUniLpFromAssets_, shares);
+        emit Deposit(msg.sender, receiver_, getDGswapLpFromAssets_, shares);
 
-        afterDeposit(getUniLpFromAssets_, shares);
+        afterDeposit(getDGswapLpFromAssets_, shares);
     }
 
-    /// @notice Mint amount of shares of this Vault (1:1 with UniLP). Requires precalculating amount of assets to
+    /// @notice Mint amount of shares of this Vault (1:1 with DGswapLP). Requires precalculating amount of assets to
     /// approve to this contract.
     /// @param sharesOfThisVault_ shares value == amount of Vault token (shares) to mint from requested lpToken. (1:1
     /// with lpToken).
@@ -204,9 +203,9 @@ contract DgswapV2ERC4626 is ERC4626 {
         afterDeposit(assets, sharesOfThisVault_);
     }
 
-    /// @notice Withdraw amount of token0/1 from burning Vault shares (1:1 with UniLP). Ie. User wants to burn 100 UniLP
+    /// @notice Withdraw amount of token0/1 from burning Vault shares (1:1 with DGswapLP). Ie. User wants to burn 100 DGswapLP
     /// (underlying) for N worth of token0/1
-    /// @param assets_ - amount of UniLP to burn (calculate amount of expected token0/1 from helper functions)
+    /// @param assets_ - amount of DGswapLP to burn (calculate amount of expected token0/1 from helper functions)
     /// @param receiver_ - Who will receive shares (Standard ERC4626)
     /// @param owner_ - Who owns shares (Standard ERC4626)
     function withdraw(
@@ -238,9 +237,9 @@ contract DgswapV2ERC4626 is ERC4626 {
         token1.safeTransfer(receiver_, assets1);
     }
 
-    /// @notice Redeem amount of Vault shares (1:1 with UniLP) for arbitrary amount of token0/1. Calculate amount of
+    /// @notice Redeem amount of Vault shares (1:1 with DGswapLP) for arbitrary amount of token0/1. Calculate amount of
     /// expected token0/1 from helper functions.
-    /// @param shares_ - amount of UniLP to burn
+    /// @param shares_ - amount of DGswapLP to burn
     /// @param receiver_ - Who will receive shares (Standard ERC4626)
     /// @param owner_ - Who owns shares (Standard ERC4626)
 function redeem(
@@ -279,7 +278,7 @@ function redeem(
     return assets;
 }
 
-    /// @notice for requested 100 UniLp tokens, how much tok0/1 we need to give?
+    /// @notice for requested 100 DGswapLP tokens, how much tok0/1 we need to give?
     function getAssetsAmounts(
         uint256 poolLpAmount_
     ) public view returns (uint256 assets0, uint256 assets1) {
@@ -289,7 +288,7 @@ function redeem(
             address(token0),
             address(token1)
         );
-        /// shares of uni pair contract
+        /// shares of dgswap pair contract
         uint256 pairSupply = pair.totalSupply();
         /// amount of token0 to provide to receive poolLpAmount_
         assets0 = (reserveA * poolLpAmount_) / pairSupply;
@@ -297,7 +296,7 @@ function redeem(
         assets1 = (reserveB * poolLpAmount_) / pairSupply;
     }
 
-    /// @notice For requested N assets0 & N assets1, how much UniV2 LP do we get?
+    /// @notice For requested N assets0 & N assets1, how much DGswapLP do we get?
     function getLiquidityAmountOutFor(
         uint256 assets0_,
         uint256 assets1_

@@ -11,8 +11,8 @@ import {IUniswapV2Router} from "../src/erc4626/interfaces/IUniswapV2Router.sol";
 contract UniswapV2ERC4626Script is Script {
 
     DgswapV2ERC4626 public dgswapV2ERC4626;
-    string name_ = "sUSDT";
-    string symbol_ = "sUSDT";
+    string name_ = "vUSDT";
+    string symbol_ = "vUSDT";
 
     ERC20 asset_ = ERC20(0x4E6DE3b8D9C3a773df245590E80e229B0deafFa0);
     IERC20 token0_ = IERC20(0xd077A400968890Eacc75cdc901F0356c943e4fDb);
