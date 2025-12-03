@@ -1,3 +1,23 @@
+/**
+ * @title DgswapV2ERC4626
+ * @author oxpampam
+ * @notice Educational implementation of an ERC4626 wrapper for DGswap V2 LP positions
+ * 
+ * ⚠️ EDUCATIONAL PURPOSE ONLY - NOT PRODUCTION READY ⚠️
+ * 
+ * @dev This is a non-standard ERC4626 implementation that accepts two tokens instead of one.
+ * Instead of: deposit(USDT) → get shares
+ * This does: deposit(token0 + token1) → get shares
+ * 
+ * PRODUCTION CONSIDERATIONS NOT IMPLEMENTED:
+ * - No handling of first 1000 LP tokens lock (MINIMUM_LIQUIDITY)
+ * - No verification of actual LP tokens received
+ * - No emergency pause mechanism
+ * - No protection against sandwich attacks
+ * - Simplified slippage model
+ *
+ */
+
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.23;
 
@@ -40,7 +60,9 @@ contract DgswapV2ERC4626 is ERC4626 {
     address public immutable manager;
 
     uint256 public slippage;
-    uint256 public immutable slippageFloat = 10_000;
+    uint256 public constant MIN_SLIPPAGE_FACTOR = 9000; // 90% = max 10% slippage
+    uint256 public constant MAX_SLIPPAGE_FACTOR = 10000; // 100% = no slippage
+    uint256 public constant SLIPPAGE_DENOMINATOR = 10000;
 
     IUniswapV2Pair public immutable pair;
     IUniswapV2Router public immutable router;
@@ -81,17 +103,25 @@ contract DgswapV2ERC4626 is ERC4626 {
         slippage = slippage_;
     }
 
-    /// @param amount_ amount of slippage
-    function setSlippage(uint256 amount_) external {
-        require(msg.sender == manager, "owner");
-        require(amount_ < 10_000 && amount_ > 9000);
-        /// 10% max slippage
-        slippage = amount_;
-    }
+/// @notice Update the slippage protection factor
+/// @param slippageFactor_ The minimum percentage of tokens to receive (in basis points)
+/// @dev slippageFactor_ = 9500 means we accept minimum 95% of optimal amount (5% slippage)
+/// @dev slippageFactor_ = 9900 means we accept minimum 99% of optimal amount (1% slippage)
+/// @dev slippageFactor_ = 9000 means we accept minimum 90% of optimal amount (10% slippage)
+/// @dev Must be between 9000 (10% max slippage) and 10000 (0% slippage)
+function setSlippage(uint256 slippageFactor_) external {
+    require(msg.sender == manager, "Only manager can update slippage");
+    require(
+        slippageFactor_ >= MIN_SLIPPAGE_FACTOR && slippageFactor_ <= MAX_SLIPPAGE_FACTOR,
+        "Slippage factor must be between 9000-10000 (max 10% slippage)"
+    );
+    slippage = slippageFactor_;
+    
+}
 
     /// @param amount_ amount of slippage
-    function getSlippage(uint256 amount_) internal view returns (uint256) {
-        return (amount_ * slippage) / slippageFloat;
+    function getMinimumAmount(uint256 amount_) internal view returns (uint256) {
+        return (amount_ * slippage) / SLIPPAGE_DENOMINATOR;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -111,8 +141,8 @@ contract DgswapV2ERC4626 is ERC4626 {
             address(token0),
             address(token1),
             assets_,
-            assets0 - getSlippage(assets0),
-            assets1 - getSlippage(assets1),
+            getMinimumAmount(assets0),
+            getMinimumAmount(assets1),
             address(this),
             block.timestamp + 100
         );
@@ -131,8 +161,8 @@ contract DgswapV2ERC4626 is ERC4626 {
             address(token1),
             assets0,
             assets1,
-            assets0 - getSlippage(assets0),
-            assets1 - getSlippage(assets1),
+            getMinimumAmount(assets0),
+            getMinimumAmount(assets1),
             address(this),
             block.timestamp + 100
         );
@@ -237,46 +267,54 @@ contract DgswapV2ERC4626 is ERC4626 {
         token1.safeTransfer(receiver_, assets1);
     }
 
-    /// @notice Redeem amount of Vault shares (1:1 with DGswapLP) for arbitrary amount of token0/1. Calculate amount of
-    /// expected token0/1 from helper functions.
-    /// @param shares_ - amount of DGswapLP to burn
-    /// @param receiver_ - Who will receive shares (Standard ERC4626)
-    /// @param owner_ - Who owns shares (Standard ERC4626)
-function redeem(
-    uint256 shares_,
-    address receiver_,
-    address owner_
-) public override returns (uint256 assets) {
-    if (msg.sender != owner_) {
-        uint256 allowed = allowance[owner_][msg.sender];
-        if (allowed != type(uint256).max) {
-            allowance[owner_][msg.sender] = allowed - shares_;
+    /// @notice Redeem amount of Vault shares (1:1 with DGswapLP) for arbitrary amount of token0/1
+    /// @param shares_ Amount of vault shares to burn
+    /// @param receiver_ Address that will receive the underlying tokens
+    /// @param owner_ Address that owns the shares being redeemed
+    /// @return assets Amount of LP tokens that were redeemed (for ERC4626 compatibility)
+    /// @dev This implementation differs from standard ERC4626 as it returns two tokens instead of one
+    function redeem(
+        uint256 shares_,
+        address receiver_,
+        address owner_
+    ) public override returns (uint256 assets) {
+        // handle allowance if caller is not the owner
+        if (msg.sender != owner_) {
+            uint256 allowed = allowance[owner_][msg.sender];
+            if (allowed != type(uint256).max) {
+                allowance[owner_][msg.sender] = allowed - shares_;
+            }
         }
+
+        // calculate how many LP tokens these shares represent
+        require((assets = previewRedeem(shares_)) != 0, "ZERO_ASSETS");
+
+        // burn the shares first (update state before external calls)
+        _burn(owner_, shares_);
+
+        // snapshot current token balances before removing liquidity
+        uint256 balance0Before = token0.balanceOf(address(this));
+        uint256 balance1Before = token1.balanceOf(address(this));
+
+        // remove liquidity from the DEX (external call)
+        // this will send token0 and token1 back to this contract
+        beforeWithdraw(assets, shares_);
+
+        // calculate actual amounts received from liquidity removal
+        uint256 amount0 = token0.balanceOf(address(this)) - balance0Before;
+        uint256 amount1 = token1.balanceOf(address(this)) - balance1Before;
+
+        // transfer the tokens to the receiver
+        token0.safeTransfer(receiver_, amount0);
+        token1.safeTransfer(receiver_, amount1);
+
+        // emit event after all state changes and transfers are complete
+        emit Withdraw(msg.sender, receiver_, owner_, assets, shares_);
+
+        // return the amount of LP tokens that were redeemed
+        // Note: Users receive token0 + token1, not the LP tokens themselves
+        return assets;
     }
-
-    require((assets = previewRedeem(shares_)) != 0, "ZERO_ASSETS");
-
-    // Snapshot balances BEFORE removing liquidity
-    uint256 balance0Before = token0.balanceOf(address(this));
-    uint256 balance1Before = token1.balanceOf(address(this));
-
-    // Remove liquidity (this deposits tokens into the vault)
-    beforeWithdraw(assets, shares_);
-
-    // Calculate ACTUAL amounts received
-    uint256 amount0 = token0.balanceOf(address(this)) - balance0Before;
-    uint256 amount1 = token1.balanceOf(address(this)) - balance1Before;
-
-    _burn(owner_, shares_);
-
-    emit Withdraw(msg.sender, receiver_, owner_, assets, shares_);
-
-    // Transfer actual received amounts
-    token0.safeTransfer(receiver_, amount0);
-    token1.safeTransfer(receiver_, amount1);
-    
-    return assets;
-}
 
     /// @notice for requested 100 DGswapLP tokens, how much tok0/1 we need to give?
     function getAssetsAmounts(
